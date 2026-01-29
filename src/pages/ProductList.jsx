@@ -1,9 +1,12 @@
 import React, { useState } from 'react';
-import { Plus, Search, Filter, Pencil, Trash2, AlertCircle } from 'lucide-react';
+import { Plus, Search, Filter, Pencil, Trash2, AlertCircle, Package } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import Modal from '../components/Modal';
+import StockAdjustmentModal from '../components/StockAdjustmentModal';
 import { db } from '../db';
 import { useEffect } from 'react';
+import { compressImage } from '../utils/imageCompressor';
+
 
 const ProductImage = ({ src, alt, className }) => {
     const [imageSrc, setImageSrc] = useState(null);
@@ -38,6 +41,8 @@ export default function ProductList() {
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [searchTerm, setSearchTerm] = useState('');
     const [editingProduct, setEditingProduct] = useState(null);
+    const [isStockAdjustmentOpen, setIsStockAdjustmentOpen] = useState(false);
+    const [adjustingProduct, setAdjustingProduct] = useState(null);
 
     const [formData, setFormData] = useState({
         name: '',
@@ -47,7 +52,7 @@ export default function ProductList() {
         retailPrice: '',
         stock: '',
         minStockAlert: '10',
-        image: '',
+        imageUrl: '',
         material: '',
         description: ''
     });
@@ -63,7 +68,7 @@ export default function ProductList() {
                 retailPrice: product.retailPrice,
                 stock: product.stock,
                 minStockAlert: product.minStockAlert,
-                image: product.image || '',
+                imageUrl: product.imageUrl || '',
                 material: product.material || '',
                 description: product.description || ''
             });
@@ -76,7 +81,7 @@ export default function ProductList() {
                 retailPrice: '',
                 stock: '',
                 minStockAlert: '10',
-                image: '',
+                imageUrl: '',
                 material: '',
                 description: ''
             });
@@ -155,7 +160,7 @@ export default function ProductList() {
                                         <td className="px-6 py-4">
                                             <div className="flex items-center gap-3">
                                                 <ProductImage
-                                                    src={product.image || product.imageUrl}
+                                                    src={product.imageUrl}
                                                     alt={product.name}
                                                     className="w-10 h-10 object-cover rounded-lg border border-slate-200"
                                                 />
@@ -193,6 +198,16 @@ export default function ProductList() {
                                         </td>
                                         <td className="px-6 py-4 text-right">
                                             <div className="flex items-center justify-end gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                                                <button
+                                                    onClick={() => {
+                                                        setAdjustingProduct(product);
+                                                        setIsStockAdjustmentOpen(true);
+                                                    }}
+                                                    className="p-2 text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                                                    title="调整库存"
+                                                >
+                                                    <Package size={18} />
+                                                </button>
                                                 <button
                                                     onClick={() => handleOpenModal(product)}
                                                     className="p-2 text-primary-600 hover:bg-primary-50 rounded-lg transition-colors"
@@ -252,8 +267,8 @@ export default function ProductList() {
                         <label className="text-sm font-medium text-slate-700">商品图片</label>
                         <div className="flex items-start gap-4">
                             <div className="w-20 h-20 bg-slate-50 border border-slate-200 rounded-lg overflow-hidden flex-shrink-0 flex items-center justify-center">
-                                {formData.image || formData.imageUrl ? (
-                                    <ProductImage src={formData.image || formData.imageUrl} className="w-full h-full object-cover" />
+                                {formData.imageUrl ? (
+                                    <ProductImage src={formData.imageUrl} className="w-full h-full object-cover" />
                                 ) : (
                                     <span className="text-xs text-slate-400">无图片</span>
                                 )}
@@ -262,14 +277,29 @@ export default function ProductList() {
                                 <input
                                     type="file"
                                     accept="image/*"
-                                    onChange={(e) => {
+                                    onChange={async (e) => {
                                         const file = e.target.files[0];
                                         if (file) {
-                                            setFormData({
-                                                ...formData,
-                                                imageFile: file,
-                                                image: URL.createObjectURL(file) // For preview
-                                            });
+                                            try {
+                                                // 显示原始图片预览
+                                                setFormData({
+                                                    ...formData,
+                                                    imageUrl: URL.createObjectURL(file)
+                                                });
+
+                                                // 压缩图片 (最大800x800, 质量0.8)
+                                                const compressedFile = await compressImage(file, 800, 800, 0.8);
+
+                                                // 更新为压缩后的图片
+                                                setFormData({
+                                                    ...formData,
+                                                    imageFile: compressedFile,
+                                                    imageUrl: URL.createObjectURL(compressedFile)
+                                                });
+                                            } catch (error) {
+                                                console.error('图片压缩失败:', error);
+                                                alert('图片处理失败,请重试');
+                                            }
                                         }
                                     }}
                                     className="block w-full text-sm text-slate-500
@@ -282,8 +312,8 @@ export default function ProductList() {
                                 <input
                                     className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-primary-500/20 outline-none placeholder:text-slate-400"
                                     placeholder="或输入图片 URL..."
-                                    value={formData.image && !formData.image.startsWith('blob:') ? formData.image : ''}
-                                    onChange={e => setFormData({ ...formData, image: e.target.value, imageFile: null })}
+                                    value={formData.imageUrl && !formData.imageUrl.startsWith('blob:') && !formData.imageUrl.startsWith('local:') ? formData.imageUrl : ''}
+                                    onChange={e => setFormData({ ...formData, imageUrl: e.target.value, imageFile: null })}
                                 />
                             </div>
                         </div>
@@ -339,13 +369,23 @@ export default function ProductList() {
 
                     <div className="grid grid-cols-2 gap-4">
                         <div className="space-y-2">
-                            <label className="text-sm font-medium text-slate-700">初始库存</label>
+                            <label className="text-sm font-medium text-slate-700">
+                                {editingProduct ? '当前库存' : '初始库存'}
+                            </label>
                             <input
-                                required type="number"
-                                className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary-500/20 outline-none"
+                                required
+                                type="number"
+                                disabled={!!editingProduct}
+                                className={`w-full px-4 py-2 border border-slate-200 rounded-lg focus:ring-2 focus:ring-primary-500/20 outline-none ${editingProduct ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-slate-50'
+                                    }`}
                                 value={formData.stock}
                                 onChange={e => setFormData({ ...formData, stock: e.target.value })}
                             />
+                            {editingProduct && (
+                                <p className="text-xs text-slate-500">
+                                    💡 库存只能通过库存调整功能修改
+                                </p>
+                            )}
                         </div>
                         <div className="space-y-2">
                             <label className="text-sm font-medium text-slate-700">库存预警阈值</label>
@@ -375,6 +415,15 @@ export default function ProductList() {
                     </div>
                 </form>
             </Modal>
+
+            <StockAdjustmentModal
+                isOpen={isStockAdjustmentOpen}
+                onClose={() => {
+                    setIsStockAdjustmentOpen(false);
+                    setAdjustingProduct(null);
+                }}
+                product={adjustingProduct}
+            />
         </div>
     );
 }

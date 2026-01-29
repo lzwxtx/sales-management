@@ -18,6 +18,7 @@ export default function ConsignmentWizard({ onClose }) {
             productId: product.id,
             quantity: 1,
             unitPrice: product.retailPrice,
+            commissionRate: currentPartner?.defaultCommissionRate || 0,
             maxStock: product.stock
         }]);
     };
@@ -37,8 +38,8 @@ export default function ConsignmentWizard({ onClose }) {
 
         addConsignment({
             partnerId: selectedPartnerId,
-            items: selectedProducts.map(({ productId, quantity, unitPrice }) => ({
-                productId, quantity, unitPrice
+            items: selectedProducts.map(({ productId, quantity, unitPrice, commissionRate }) => ({
+                productId, quantity, unitPrice, commissionRate
             })),
             totalValue: selectedProducts.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0)
         });
@@ -72,8 +73,8 @@ export default function ConsignmentWizard({ onClose }) {
                                     key={partner.id}
                                     onClick={() => setSelectedPartnerId(partner.id)}
                                     className={`p-6 rounded-xl border text-left transition-all ${selectedPartnerId === partner.id
-                                            ? 'border-primary-500 bg-primary-50 ring-2 ring-primary-200'
-                                            : 'border-slate-200 bg-white hover:border-primary-300'
+                                        ? 'border-primary-500 bg-primary-50 ring-2 ring-primary-200'
+                                        : 'border-slate-200 bg-white hover:border-primary-300'
                                         }`}
                                 >
                                     <div className="flex items-center gap-3 mb-2">
@@ -127,7 +128,7 @@ export default function ConsignmentWizard({ onClose }) {
                                 {selectedProducts.map(item => {
                                     const product = products.find(p => p.id === item.productId);
                                     return (
-                                        <div key={item.productId} className="flex items-center gap-4 p-3 border rounded-lg">
+                                        <div key={item.productId} className="flex items-center gap-3 p-3 border rounded-lg">
                                             <div className="flex-1">
                                                 <div className="font-medium">{product.name}</div>
                                                 <div className="text-xs text-slate-500">￥{item.unitPrice} / 件</div>
@@ -138,8 +139,20 @@ export default function ConsignmentWizard({ onClose }) {
                                                     type="number" min="1" max={product.stock}
                                                     value={item.quantity}
                                                     onChange={(e) => updateItem(item.productId, 'quantity', e.target.value)}
-                                                    className="w-20 px-2 py-1 border rounded text-center"
+                                                    className="w-16 px-2 py-1 border rounded text-center"
                                                 />
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                <label className="text-xs text-slate-400">佣金率</label>
+                                                <div className="flex items-center gap-1">
+                                                    <input
+                                                        type="number" min="0" max="100" step="0.1"
+                                                        value={item.commissionRate}
+                                                        onChange={(e) => updateItem(item.productId, 'commissionRate', e.target.value)}
+                                                        className="w-16 px-2 py-1 border rounded text-center"
+                                                    />
+                                                    <span className="text-xs text-slate-400">%</span>
+                                                </div>
                                             </div>
                                             <button onClick={() => removeItem(item.productId)} className="text-red-400 hover:text-red-600">
                                                 ×
@@ -156,7 +169,7 @@ export default function ConsignmentWizard({ onClose }) {
                 )}
 
                 {step === 3 && (
-                    <div className="max-w-2xl mx-auto bg-white p-8 rounded-xl shadow-lg border border-slate-100">
+                    <div className="max-w-4xl mx-auto bg-white p-8 rounded-xl shadow-lg border border-slate-100">
                         <div className="text-center mb-8">
                             <div className="w-16 h-16 bg-green-100 text-green-600 rounded-full flex items-center justify-center mx-auto mb-4">
                                 <Check size={32} />
@@ -165,21 +178,62 @@ export default function ConsignmentWizard({ onClose }) {
                             <p className="text-slate-500">请确认以下信息无误</p>
                         </div>
 
-                        <div className="space-y-4 border-t border-b border-gray-100 py-6">
+                        <div className="space-y-4 border-t border-gray-100 pt-6 pb-4">
                             <div className="flex justify-between">
                                 <span className="text-slate-500">合作伙伴</span>
                                 <span className="font-medium">{currentPartner?.name}</span>
                             </div>
-                            <div className="flex justify-between">
+                        </div>
+
+                        {/* 商品明细表格 */}
+                        <div className="mb-6">
+                            <h4 className="font-bold text-slate-800 mb-3 text-sm">商品明细</h4>
+                            <div className="border border-gray-200 rounded-lg overflow-hidden">
+                                <table className="w-full text-sm">
+                                    <thead className="bg-slate-50 text-slate-600">
+                                        <tr>
+                                            <th className="px-4 py-2 text-left">商品名称</th>
+                                            <th className="px-4 py-2 text-center">数量</th>
+                                            <th className="px-4 py-2 text-right">单价</th>
+                                            <th className="px-4 py-2 text-center">佣金率</th>
+                                            <th className="px-4 py-2 text-right">小计</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-100">
+                                        {selectedProducts.map(item => {
+                                            const product = products.find(p => p.id === item.productId);
+                                            return (
+                                                <tr key={item.productId}>
+                                                    <td className="px-4 py-3 font-medium">{product?.name}</td>
+                                                    <td className="px-4 py-3 text-center">{item.quantity}</td>
+                                                    <td className="px-4 py-3 text-right">¥{item.unitPrice.toFixed(2)}</td>
+                                                    <td className="px-4 py-3 text-center">
+                                                        <span className="inline-block px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs font-medium">
+                                                            {item.commissionRate}%
+                                                        </span>
+                                                    </td>
+                                                    <td className="px-4 py-3 text-right font-medium">
+                                                        ¥{(item.quantity * item.unitPrice).toFixed(2)}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div className="space-y-3 border-t border-gray-100 pt-4">
+                            <div className="flex justify-between text-sm">
                                 <span className="text-slate-500">商品种类</span>
                                 <span className="font-medium">{selectedProducts.length} 种</span>
                             </div>
-                            <div className="flex justify-between">
+                            <div className="flex justify-between text-sm">
                                 <span className="text-slate-500">总件数</span>
                                 <span className="font-medium">{selectedProducts.reduce((a, b) => a + b.quantity, 0)} 件</span>
                             </div>
                             <div className="flex justify-between">
-                                <span className="text-slate-500">总货值 (零售价)</span>
+                                <span className="text-slate-600 font-medium">总货值 (零售价)</span>
                                 <span className="font-bold text-lg text-primary-600">
                                     ¥{selectedProducts.reduce((a, b) => a + (b.quantity * b.unitPrice), 0).toFixed(2)}
                                 </span>

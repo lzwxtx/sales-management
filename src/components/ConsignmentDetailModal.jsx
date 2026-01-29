@@ -163,6 +163,7 @@ export default function ConsignmentDetailModal({ orderId, onClose }) {
                                 <tr>
                                     <th className="px-4 py-2 text-left">商品</th>
                                     <th className="px-4 py-2 text-center">寄售量</th>
+                                    <th className="px-4 py-2 text-center">佣金率</th>
                                     <th className="px-4 py-2 text-center text-green-600">已售</th>
                                     <th className="px-4 py-2 text-center text-orange-600">退回</th>
                                     <th className="px-4 py-2 text-center font-bold">剩余</th>
@@ -175,6 +176,11 @@ export default function ConsignmentDetailModal({ orderId, onClose }) {
                                         <tr key={item.productId}>
                                             <td className="px-4 py-3 font-medium">{product?.name}</td>
                                             <td className="px-4 py-3 text-center text-slate-500">{item.quantity}</td>
+                                            <td className="px-4 py-3 text-center">
+                                                <span className="inline-block px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs font-medium">
+                                                    {item.commissionRate || 0}%
+                                                </span>
+                                            </td>
                                             <td className="px-4 py-3 text-center text-green-600 font-medium">{item.sold > 0 ? item.sold : '-'}</td>
                                             <td className="px-4 py-3 text-center text-orange-600 font-medium">{item.returned > 0 ? item.returned : '-'}</td>
                                             <td className="px-4 py-3 text-center font-bold text-slate-800">{item.remaining}</td>

@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { Plus, Search, Filter, Truck, PackageCheck, AlertCircle } from 'lucide-react';
+import { Plus, Search, Filter, Truck, PackageCheck, AlertCircle, Merge } from 'lucide-react';
 import { useStore } from '../store/useStore';
 import ConsignmentWizard from '../components/ConsignmentWizard';
 import ConsignmentDetailModal from '../components/ConsignmentDetailModal';
+import ConsignmentMergeModal from '../components/ConsignmentMergeModal';
 import { format } from 'date-fns';
 import { generateConsignmentPDF } from '../utils/pdfGenerator';
 
@@ -11,15 +12,45 @@ export default function ConsignmentList() {
     const [isWizardOpen, setIsWizardOpen] = useState(false);
     const [viewMode, setViewMode] = useState('LIST'); // LIST, STATS
     const [activeTab, setActiveTab] = useState('ALL'); // ALL, DRAFT, CONFIRMED, COMPLETED
+    const [selectedPartnerId, setSelectedPartnerId] = useState('ALL'); // Partner filter
 
     const [selectedOrderId, setSelectedOrderId] = useState(null);
+    const [mergePartnerId, setMergePartnerId] = useState(null);
 
     const filteredConsignments = consignments.filter(c => {
         if (activeTab !== 'ALL' && c.status !== activeTab) return false;
+        if (selectedPartnerId !== 'ALL' && c.partnerId !== selectedPartnerId) return false;
         return true;
     });
 
     const getPartnerName = (id) => partners.find(p => p.id === id)?.name || '未知合作伙伴';
+
+    // Helper to check if consignment has remaining items
+    const hasRemainingItems = (consignment) => {
+        const totalSent = consignment.items.reduce((sum, item) => sum + item.quantity, 0);
+        const totalSold = (consignment.soldItems || []).reduce((sum, item) => sum + item.quantity, 0);
+        const totalReturned = (consignment.returnedItems || []).reduce((sum, item) => sum + item.quantity, 0);
+        return totalSent > (totalSold + totalReturned);
+    };
+
+    // Group consignments by partner for merge detection
+    const consignmentsByPartner = {};
+    filteredConsignments.forEach(c => {
+        if (!consignmentsByPartner[c.partnerId]) {
+            consignmentsByPartner[c.partnerId] = [];
+        }
+        consignmentsByPartner[c.partnerId].push(c);
+    });
+
+    // Check if partner has mergeable consignments
+    const getMergeableCount = (partnerId) => {
+        const partnerOrders = consignments.filter(c =>
+            c.partnerId === partnerId &&
+            c.status === 'CONFIRMED' &&
+            hasRemainingItems(c)
+        );
+        return partnerOrders.length;
+    };
 
     // --- Stats Calculation ---
     const partnerStats = partners.map(partner => {
@@ -91,21 +122,38 @@ export default function ConsignmentList() {
                 </div>
 
                 {viewMode === 'LIST' && (
-                    <div className="flex gap-2">
-                        {['ALL', 'DRAFT', 'CONFIRMED', 'COMPLETED'].map(tab => (
-                            <button
-                                key={tab}
-                                onClick={() => setActiveTab(tab)}
-                                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${activeTab === tab
-                                    ? 'bg-slate-200 text-slate-800'
-                                    : 'text-slate-500 hover:bg-slate-100'
-                                    }`}
-                            >
-                                {tab === 'ALL' ? '全部' :
-                                    tab === 'DRAFT' ? '草稿' :
-                                        tab === 'CONFIRMED' ? '进行中' : '已完成'}
-                            </button>
-                        ))}
+                    <div className="flex gap-3">
+                        {/* Status Filter */}
+                        <div className="flex gap-2">
+                            {['ALL', 'DRAFT', 'CONFIRMED', 'COMPLETED'].map(tab => (
+                                <button
+                                    key={tab}
+                                    onClick={() => setActiveTab(tab)}
+                                    className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${activeTab === tab
+                                        ? 'bg-slate-200 text-slate-800'
+                                        : 'text-slate-500 hover:bg-slate-100'
+                                        }`}
+                                >
+                                    {tab === 'ALL' ? '全部' :
+                                        tab === 'DRAFT' ? '草稿' :
+                                            tab === 'CONFIRMED' ? '进行中' : '已完成'}
+                                </button>
+                            ))}
+                        </div>
+
+                        {/* Partner Filter */}
+                        <select
+                            value={selectedPartnerId}
+                            onChange={(e) => setSelectedPartnerId(e.target.value)}
+                            className="px-3 py-1.5 border border-slate-200 rounded-md text-xs font-medium text-slate-700 bg-white hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
+                        >
+                            <option value="ALL">所有合作伙伴</option>
+                            {partners.map(partner => (
+                                <option key={partner.id} value={partner.id}>
+                                    {partner.name}
+                                </option>
+                            ))}
+                        </select>
                     </div>
                 )}
 
@@ -120,66 +168,97 @@ export default function ConsignmentList() {
 
             {/* VIEWS */}
             {viewMode === 'LIST' ? (
-                <div className="grid grid-cols-1 gap-4">
-                    {filteredConsignments.map(order => (
-                        <div key={order.id} className="glass-card p-6 rounded-xl border border-white/40 hover:shadow-lg transition-all group">
-                            <div className="flex items-center justify-between mb-4">
-                                <div className="flex items-center gap-4">
-                                    <div className={`w-12 h-12 rounded-full flex items-center justify-center ${order.status === 'CONFIRMED' ? 'bg-green-100 text-green-600' :
-                                        order.status === 'DRAFT' ? 'bg-yellow-100 text-yellow-600' : 'bg-slate-100 text-slate-500'
-                                        }`}>
-                                        <Truck size={24} />
-                                    </div>
-                                    <div>
-                                        <h3 className="font-bold text-lg text-slate-800">{getPartnerName(order.partnerId)}</h3>
-                                        <div className="flex gap-2 text-sm text-slate-500">
-                                            <span>{format(new Date(order.createAt), 'yyyy-MM-dd HH:mm')}</span>
-                                            <span>•</span>
-                                            <span>共 {order.items.length} 种商品</span>
+                <div className="space-y-6">
+                    {/* Group by partner */}
+                    {Object.entries(consignmentsByPartner).map(([partnerId, orders]) => {
+                        const partner = partners.find(p => p.id === partnerId);
+                        const mergeableCount = getMergeableCount(partnerId);
+
+                        return (
+                            <div key={partnerId} className="space-y-3">
+                                {/* Partner Header */}
+                                <div className="flex items-center justify-between">
+                                    <h3 className="text-lg font-bold text-slate-800 flex items-center gap-2">
+                                        <Truck size={20} className="text-primary-600" />
+                                        {partner?.name || '未知合作伙伴'}
+                                        <span className="text-sm font-normal text-slate-500">({orders.length})</span>
+                                    </h3>
+                                    {mergeableCount >= 2 && (
+                                        <button
+                                            onClick={() => setMergePartnerId(partnerId)}
+                                            className="flex items-center gap-2 px-4 py-2 bg-orange-100 text-orange-700 border border-orange-300 rounded-lg hover:bg-orange-200 transition-colors font-medium text-sm"
+                                        >
+                                            <Merge size={16} />
+                                            合并寄售单 ({mergeableCount})
+                                        </button>
+                                    )}
+                                </div>
+
+                                {/* Consignments for this partner */}
+                                <div className="grid grid-cols-1 gap-4">
+                                    {orders.map(order => (
+                                        <div key={order.id} className="glass-card p-6 rounded-xl border border-white/40 hover:shadow-lg transition-all group">
+                                            <div className="flex items-center justify-between mb-4">
+                                                <div className="flex items-center gap-4">
+                                                    <div className={`w-12 h-12 rounded-full flex items-center justify-center ${order.status === 'CONFIRMED' ? 'bg-green-100 text-green-600' :
+                                                        order.status === 'DRAFT' ? 'bg-yellow-100 text-yellow-600' : 'bg-slate-100 text-slate-500'
+                                                        }`}>
+                                                        <Truck size={24} />
+                                                    </div>
+                                                    <div>
+                                                        <h3 className="font-bold text-lg text-slate-800">{getPartnerName(order.partnerId)}</h3>
+                                                        <div className="flex gap-2 text-sm text-slate-500">
+                                                            <span>{format(new Date(order.createAt), 'yyyy-MM-dd HH:mm')}</span>
+                                                            <span>•</span>
+                                                            <span>共 {order.items.length} 种商品</span>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div className="text-right">
+                                                    <span className={`px-3 py-1 rounded-full text-xs font-bold ${order.status === 'CONFIRMED' ? 'bg-green-100 text-green-700' :
+                                                        order.status === 'DRAFT' ? 'bg-yellow-100 text-yellow-700' : 'bg-slate-100 text-slate-700'
+                                                        }`}>
+                                                        {order.status === 'CONFIRMED' ? '进行中' : order.status === 'DRAFT' ? '草稿' : '已完成'}
+                                                    </span>
+                                                </div>
+                                            </div>
+
+                                            <div className="bg-slate-50/50 rounded-lg p-4 grid grid-cols-4 gap-4 text-sm">
+                                                <div>
+                                                    <div className="text-slate-500 mb-1">总货值 (零售)</div>
+                                                    <div className="font-medium">¥{order.items.reduce((s, i) => s + (i.quantity * i.unitPrice), 0).toFixed(2)}</div>
+                                                </div>
+                                                <div>
+                                                    <div className="text-slate-500 mb-1">已售数量</div>
+                                                    <div className="font-medium text-green-600">
+                                                        {order.soldItems?.reduce((s, i) => s + i.quantity, 0) || 0}
+                                                    </div>
+                                                </div>
+                                                <div>
+                                                    <div className="text-slate-500 mb-1">已退回</div>
+                                                    <div className="font-medium text-orange-600">
+                                                        {order.returnedItems?.reduce((s, i) => s + i.quantity, 0) || 0}
+                                                    </div>
+                                                </div>
+                                                <div className="flex justify-end items-center gap-3">
+                                                    <button
+                                                        onClick={() => handleExportPDF(order)}
+                                                        className="text-slate-500 hover:text-slate-700 font-medium text-xs border border-slate-200 px-3 py-1 rounded hover:bg-white transition-colors"
+                                                    >
+                                                        导出 PDF
+                                                    </button>
+                                                    <button onClick={() => setSelectedOrderId(order.id)} className="text-primary-600 hover:text-primary-700 font-medium hover:underline">
+                                                        查看详情 &rarr;
+                                                    </button>
+                                                </div>
+                                            </div>
                                         </div>
-                                    </div>
-                                </div>
-
-                                <div className="text-right">
-                                    <span className={`px-3 py-1 rounded-full text-xs font-bold ${order.status === 'CONFIRMED' ? 'bg-green-100 text-green-700' :
-                                        order.status === 'DRAFT' ? 'bg-yellow-100 text-yellow-700' : 'bg-slate-100 text-slate-700'
-                                        }`}>
-                                        {order.status === 'CONFIRMED' ? '进行中' : order.status === 'DRAFT' ? '草稿' : '已完成'}
-                                    </span>
+                                    ))}
                                 </div>
                             </div>
-
-                            <div className="bg-slate-50/50 rounded-lg p-4 grid grid-cols-4 gap-4 text-sm">
-                                <div>
-                                    <div className="text-slate-500 mb-1">总货值 (零售)</div>
-                                    <div className="font-medium">¥{order.items.reduce((s, i) => s + (i.quantity * i.unitPrice), 0).toFixed(2)}</div>
-                                </div>
-                                <div>
-                                    <div className="text-slate-500 mb-1">已售数量</div>
-                                    <div className="font-medium text-green-600">
-                                        {order.soldItems?.reduce((s, i) => s + i.quantity, 0) || 0}
-                                    </div>
-                                </div>
-                                <div>
-                                    <div className="text-slate-500 mb-1">已退回</div>
-                                    <div className="font-medium text-orange-600">
-                                        {order.returnedItems?.reduce((s, i) => s + i.quantity, 0) || 0}
-                                    </div>
-                                </div>
-                                <div className="flex justify-end items-center gap-3">
-                                    <button
-                                        onClick={() => handleExportPDF(order)}
-                                        className="text-slate-500 hover:text-slate-700 font-medium text-xs border border-slate-200 px-3 py-1 rounded hover:bg-white transition-colors"
-                                    >
-                                        导出 PDF
-                                    </button>
-                                    <button onClick={() => setSelectedOrderId(order.id)} className="text-primary-600 hover:text-primary-700 font-medium hover:underline">
-                                        查看详情 &rarr;
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    ))}
+                        );
+                    })}
                     {filteredConsignments.length === 0 && (
                         <div className="text-center py-20 text-slate-400">没有找到寄售单</div>
                     )}
@@ -228,7 +307,12 @@ export default function ConsignmentList() {
                 />
             )}
 
-            {/* Logs Modal - Placeholder for now until separate component */}
+            {mergePartnerId && (
+                <ConsignmentMergeModal
+                    partnerId={mergePartnerId}
+                    onClose={() => setMergePartnerId(null)}
+                />
+            )}
 
         </div>
     );

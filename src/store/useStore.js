@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { db } from '../db';
+import { syncManager } from '../utils/syncManager';
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
@@ -15,6 +16,11 @@ export const useStore = create((set, get) => ({
             db.sales.toArray(),
         ]);
         set({ products, partners, consignments, sales, isLoaded: true });
+
+        // 初始化跨标签页同步
+        syncManager.init(({ action, data }) => {
+            get().syncFromExternal(action, data);
+        });
     },
 
     // --- Products Slice ---
@@ -43,6 +49,8 @@ export const useStore = create((set, get) => ({
         set((state) => ({ products: [...state.products, newProduct] }));
         // 2. Persist
         await db.products.add(newProduct);
+        // 3. Broadcast to other tabs
+        syncManager.broadcast('ADD_PRODUCT', newProduct);
     },
     updateProduct: async (id, updates) => {
         let finalUpdates = { ...updates };
@@ -59,23 +67,63 @@ export const useStore = create((set, get) => ({
             products: state.products.map(p => p.id === id ? { ...p, ...finalUpdates } : p)
         }));
         await db.products.update(id, finalUpdates);
+        syncManager.broadcast('UPDATE_PRODUCT', { id, updates: finalUpdates });
     },
-    deleteProduct: async (id) => {
-        set((state) => ({
-            products: state.products.filter(p => p.id !== id)
-        }));
-        await db.products.delete(id);
-    },
-    updateStock: async (id, quantity) => {
-        const product = get().products.find(p => p.id === id);
-        if (product) {
-            const newStock = product.stock + quantity;
-            set((state) => ({
-                products: state.products.map(p => p.id === id ? { ...p, stock: newStock } : p)
-            }));
-            await db.products.update(id, { stock: newStock });
+    addStockAdjustment: async (adjustment) => {
+        const { productId, type, reason, quantity, note } = adjustment;
+        const state = get();
+        const product = state.products.find(p => p.id === productId);
+
+        if (!product) {
+            throw new Error('商品不存在');
         }
+
+        // 计算新库存
+        const delta = type === 'IN' ? quantity : -quantity;
+        const newStock = product.stock + delta;
+
+        if (newStock < 0) {
+            throw new Error('库存不足，无法出库');
+        }
+
+        // 创建调整记录
+        const record = {
+            productId,
+            type,
+            reason,
+            quantity: Number(quantity),
+            note: note || '',
+            date: new Date().toISOString()
+        };
+
+        // 更新状态
+        set({
+            products: state.products.map(p =>
+                p.id === productId ? { ...p, stock: newStock } : p
+            )
+        });
+
+        // 持久化
+        await Promise.all([
+            db.products.update(productId, { stock: newStock }),
+            db.inventory_logs.add({
+                type: type === 'IN' ? 'ADJUSTMENT_IN' : 'ADJUSTMENT_OUT',
+                date: new Date().toISOString(),
+                partnerId: null,
+                productId,
+                items: [{
+                    productId,
+                    quantity: Number(quantity)
+                }],
+                reason,
+                note: note || ''
+            })
+        ]);
+
+        // 广播库存变更
+        syncManager.broadcast('STOCK_ADJUSTMENT', { productId, newStock });
     },
+
 
     // --- Partners Slice ---
     partners: [],
@@ -86,12 +134,14 @@ export const useStore = create((set, get) => ({
             partners: [...state.partners, newPartner]
         }));
         await db.partners.add(newPartner);
+        syncManager.broadcast('ADD_PARTNER', newPartner);
     },
     updatePartner: async (id, updates) => {
         set((state) => ({
             partners: state.partners.map(p => p.id === id ? { ...p, ...updates } : p)
         }));
         await db.partners.update(id, updates);
+        syncManager.broadcast('UPDATE_PARTNER', { id, updates });
     },
 
     // --- Consignment Slice ---
@@ -110,6 +160,7 @@ export const useStore = create((set, get) => ({
             consignments: [...state.consignments, newOrder]
         }));
         await db.consignments.add(newOrder);
+        syncManager.broadcast('ADD_CONSIGNMENT', newOrder);
     },
     updateConsignmentStatus: async (id, status) => {
         const state = get();
@@ -140,18 +191,23 @@ export const useStore = create((set, get) => ({
                 db.consignments.update(id, { status }),
                 ...productUpdates,
                 // Log SEND
-                db.consignment_logs.add({
-                    partnerId: order.partnerId,
+                db.inventory_logs.add({
                     type: 'SEND',
                     date: new Date().toISOString(),
-                    items: order.items // Snapshot of items sent
+                    partnerId: order.partnerId,
+                    items: order.items,
+                    productId: null,
+                    reason: null,
+                    note: null
                 })
             ]);
+            syncManager.broadcast('UPDATE_CONSIGNMENT_STATUS', { id, status });
         } else {
             set({
                 consignments: state.consignments.map(c => c.id === id ? { ...c, status } : c)
             });
             await db.consignments.update(id, { status });
+            syncManager.broadcast('UPDATE_CONSIGNMENT_STATUS', { id, status });
         }
     },
 
@@ -194,12 +250,99 @@ export const useStore = create((set, get) => ({
             db.sales.add(salesRecord),
             db.consignments.update(consignmentId, { soldItems: targetConsignment.soldItems }),
             // Log SOLD
-            db.consignment_logs.add({
-                partnerId: targetConsignment.partnerId,
+            db.inventory_logs.add({
                 type: 'SOLD',
                 date: new Date().toISOString(),
-                items: soldItems
+                partnerId: targetConsignment.partnerId,
+                items: soldItems,
+                productId: null,
+                reason: null,
+                note: null
             })
+        ]);
+    },
+
+    // Merge multiple consignments for the same partner
+    mergeConsignments: async (targetId, sourceIds) => {
+        const state = get();
+        const targetOrder = state.consignments.find(c => c.id === targetId);
+        if (!targetOrder) return;
+
+        // Get all source consignments to merge
+        const sourceOrders = sourceIds.map(id =>
+            state.consignments.find(c => c.id === id)
+        ).filter(Boolean);
+
+        if (sourceOrders.length === 0) return;
+
+        // Merge items list
+        const mergedItems = [...targetOrder.items];
+        const mergedSoldItems = [...(targetOrder.soldItems || [])];
+        const mergedReturnedItems = [...(targetOrder.returnedItems || [])];
+
+        sourceOrders.forEach(source => {
+            // Merge items
+            source.items.forEach(newItem => {
+                const existing = mergedItems.find(i => i.productId === newItem.productId);
+                if (existing) {
+                    existing.quantity += newItem.quantity;
+                } else {
+                    mergedItems.push({ ...newItem });
+                }
+            });
+
+            // Merge soldItems
+            if (source.soldItems) {
+                source.soldItems.forEach(soldItem => {
+                    const existing = mergedSoldItems.find(i => i.productId === soldItem.productId);
+                    if (existing) {
+                        existing.quantity += soldItem.quantity;
+                    } else {
+                        mergedSoldItems.push({ ...soldItem });
+                    }
+                });
+            }
+
+            // Merge returnedItems
+            if (source.returnedItems) {
+                source.returnedItems.forEach(returnedItem => {
+                    const existing = mergedReturnedItems.find(i => i.productId === returnedItem.productId);
+                    if (existing) {
+                        existing.quantity += returnedItem.quantity;
+                    } else {
+                        mergedReturnedItems.push({ ...returnedItem });
+                    }
+                });
+            }
+        });
+
+        // Recalculate total value
+        const totalValue = mergedItems.reduce((sum, item) =>
+            sum + (item.quantity * item.unitPrice), 0
+        );
+
+        // Update state - remove source consignments, update target
+        set({
+            consignments: state.consignments
+                .filter(c => !sourceIds.includes(c.id))
+                .map(c => c.id === targetId ? {
+                    ...c,
+                    items: mergedItems,
+                    soldItems: mergedSoldItems,
+                    returnedItems: mergedReturnedItems,
+                    totalValue
+                } : c)
+        });
+
+        // Persist to database
+        await Promise.all([
+            db.consignments.update(targetId, {
+                items: mergedItems,
+                soldItems: mergedSoldItems,
+                returnedItems: mergedReturnedItems,
+                totalValue
+            }),
+            ...sourceIds.map(id => db.consignments.delete(id))
         ]);
     },
 
@@ -244,11 +387,14 @@ export const useStore = create((set, get) => ({
             ...productUpdates,
             db.consignments.update(consignmentId, { returnedItems: targetConsignment.returnedItems }),
             // Log RETURN
-            db.consignment_logs.add({
-                partnerId: targetConsignment.partnerId,
+            db.inventory_logs.add({
                 type: 'RETURN',
                 date: new Date().toISOString(),
-                items: returnedItems
+                partnerId: targetConsignment.partnerId,
+                items: returnedItems,
+                productId: null,
+                reason: null,
+                note: null
             })
         ]);
     },
@@ -284,6 +430,93 @@ export const useStore = create((set, get) => ({
         } else {
             set({ sales: [...state.sales, salesRecord] });
             await db.sales.add(salesRecord);
+        }
+    },
+
+    // --- 跨标签页同步处理 ---
+    syncFromExternal: (action, data) => {
+        const state = get();
+
+        switch (action) {
+            case 'ADD_PRODUCT':
+                // 检查是否已存在(避免重复)
+                if (!state.products.find(p => p.id === data.id)) {
+                    set({ products: [...state.products, data] });
+                }
+                break;
+
+            case 'UPDATE_PRODUCT':
+                set({
+                    products: state.products.map(p =>
+                        p.id === data.id ? { ...p, ...data.updates } : p
+                    )
+                });
+                break;
+
+            case 'ADD_PARTNER':
+                if (!state.partners.find(p => p.id === data.id)) {
+                    set({ partners: [...state.partners, data] });
+                }
+                break;
+
+            case 'UPDATE_PARTNER':
+                set({
+                    partners: state.partners.map(p =>
+                        p.id === data.id ? { ...p, ...data.updates } : p
+                    )
+                });
+                break;
+
+            case 'ADD_CONSIGNMENT':
+                if (!state.consignments.find(c => c.id === data.id)) {
+                    set({ consignments: [...state.consignments, data] });
+                }
+                break;
+
+            case 'UPDATE_CONSIGNMENT_STATUS':
+                set({
+                    consignments: state.consignments.map(c =>
+                        c.id === data.id ? { ...c, status: data.status } : c
+                    )
+                });
+                break;
+
+            case 'UPDATE_CONSIGNMENT':
+                set({
+                    consignments: state.consignments.map(c =>
+                        c.id === data.id ? { ...c, ...data.updates } : c
+                    )
+                });
+                break;
+
+            case 'DELETE_CONSIGNMENT':
+                set({
+                    consignments: state.consignments.filter(c => c.id !== data.id)
+                });
+                break;
+
+            case 'ADD_SALE':
+                if (!state.sales.find(s => s.id === data.id)) {
+                    set({ sales: [...state.sales, data] });
+                }
+                break;
+
+            case 'STOCK_ADJUSTMENT':
+                // 更新产品库存
+                set({
+                    products: state.products.map(p =>
+                        p.id === data.productId ? { ...p, stock: data.newStock } : p
+                    )
+                });
+                break;
+
+            case 'RELOAD_ALL':
+                // 完全重新加载所有数据
+                get().init();
+                break;
+
+            default:
+                console.warn('[SyncManager] 未知的同步操作:', action);
         }
     },
 }));
